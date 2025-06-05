@@ -9,7 +9,7 @@
 ### Install requirements
 - ``` pip install -r requirements.txt ```
 ### Store AWS Secrets
-- For replit.com : DO NOT KEEP SECRETS IN .env
+- For replit.com : DO NOT KEEP SECRETS IN .env add to Secrets
 - For local dev : .env file is acceptable
 
 ### Get stock data from tech echios end point
