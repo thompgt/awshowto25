@@ -6,8 +6,20 @@
 - How to use Bedrock
   - Example prompts
 
+### Download file to localhost
+- In replit open shell / terminal
+- git clone https://github.com/ckechios/awshowto25.git t
+- In terminal execute command
+```shell
+zip -r support.zip ./t/*
+```
+- Download support.zip
+zip -r support.zip ./*
+
 ### Install requirements
-- ``` pip install -r requirements.txt ```
+``` 
+pip install -r requirements.txt 
+```
 ### Store AWS Secrets
 - For replit.com : DO NOT KEEP SECRETS IN .env add to Secrets
 - For local dev : .env file is acceptable
