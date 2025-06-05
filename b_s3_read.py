@@ -15,7 +15,7 @@ AWS_ACCESS_KEY_ID = os.environ.get("ID")
 AWS_SECRET_ACCESS_KEY = os.environ.get("PASS")
 S3_BUCKET = "stock-details-ech-eg"
 S3_PREFIX = "json_by_symbol"
-SYMBOL = "TATACOMM.BSE"
+SYMBOL = "APLE"
 
 # print(AWS_ACCESS_KEY_ID)
 # print(AWS_SECRET_ACCESS_KEY)

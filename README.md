@@ -5,6 +5,7 @@
 - How to download from S3 bucket
 - How to use Bedrock
   - Example prompts
+- **NEW** How to plot using matplotlib?
 
 ### Download file to localhost
 - In replit open shell / terminal
@@ -35,3 +36,7 @@ pip install -r requirements.txt
 ### How to use Bedrock
 - example shown in d_genai_zeroshot.py
 
+### Plotting with Matplotlib
+- added file g_plot_data.py
+- APLE.json
+- TATACOMM.BSE.json

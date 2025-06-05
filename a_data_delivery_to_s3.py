@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-symbol="TATACOMM.BSE"
+symbol="APLE"
 
 url = f"https://tech.echios.com/fetchdata/{symbol}"
 
