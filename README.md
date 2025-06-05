@@ -8,10 +8,11 @@
 
 ### Download file to localhost
 - In replit open shell / terminal
-- git clone https://github.com/ckechios/awshowto25.git t
+- git clone https://github.com/ckechios/awshowto25.git support
 - In terminal execute command
 ```shell
-zip -r support.zip ./t/*
+cd support
+zip -r support.zip ./*
 ```
 - Download support.zip
 zip -r support.zip ./*
