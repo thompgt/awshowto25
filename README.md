@@ -6,6 +6,8 @@
 - How to use Bedrock
   - Example prompts
 
+### Install requirements
+- ``` pip install -r requirements.txt ```
 ### Store AWS Secrets
 - For replit.com : DO NOT KEEP SECRETS IN .env
 - For local dev : .env file is acceptable
@@ -15,8 +17,8 @@
 - example show in a_data_delivery_to_s3.py
 
 ### Download from S3 bucket
-- example shown in a_s3_read.py
+- example shown in b_s3_read.py
 
 ### How to use Bedrock
-- example shown in c_genai.py
+- example shown in d_genai_zeroshot.py
 
