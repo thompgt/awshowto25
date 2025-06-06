@@ -1,3 +1,7 @@
 requests
 boto3
 python-dotenv
+streamlit
+pandas 
+plotly
+numpy
