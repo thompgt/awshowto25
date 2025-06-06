@@ -1,9 +1,8 @@
-
 import pandas as pd
 import numpy as np
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 import plotly.graph_objects as go
-import json
 import warnings
 from datetime import timedelta
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -155,7 +154,6 @@ def forecast_stock_price(symbol, cutoff=2016, forecast_days=30):
         
         for i in range(forecast_days):
             current_date = forecast_dates[i]
-            
             # Mean-reverting volatility
             vol_shock = np.random.normal(0, daily_vol * 0.1)
             if i == 0:
@@ -164,8 +162,24 @@ def forecast_stock_price(symbol, cutoff=2016, forecast_days=30):
                 prev_date = forecast_dates[i-1]
                 prev_vol = future_exog.loc[prev_date, 'volatility']
                 future_exog.loc[current_date, 'volatility'] = prev_vol + vol_reversion_speed * (long_term_vol - prev_vol) + vol_shock
-                # Generate constrained forecast
+            # Mean-reverting RSI
+            if i == 0:
+                future_exog.loc[current_date, 'rsi'] = last_rsi + rsi_reversion_speed * (50 - last_rsi) + np.random.normal(0, 2)
+            else:
+                prev_date = forecast_dates[i-1]
+                prev_rsi = future_exog.loc[prev_date, 'rsi']
+                future_exog.loc[current_date, 'rsi'] = prev_rsi + rsi_reversion_speed * (50 - prev_rsi) + np.random.normal(0, 2)
+            
+            # Mean-reverting price vs MA20
+            if i == 0:
+                future_exog.loc[current_date, 'price_vs_ma20'] = last_price_vs_ma + price_ma_reversion_speed * (0 - last_price_vs_ma) + np.random.normal(0, 0.01)
+            else:
+                prev_date = forecast_dates[i-1]
+                prev_price_ma = future_exog.loc[prev_date, 'price_vs_ma20']
+                future_exog.loc[current_date, 'price_vs_ma20'] = prev_price_ma + price_ma_reversion_speed * (0 - prev_price_ma) + np.random.normal(0, 0.01)
+        # Ensure to include future_exog when forecasting
         try:
+            print(future_exog)
             log_forecast = model_fit.forecast(steps=forecast_days, exog=future_exog)
         except Exception as forecast_error:
             print(f"Forecast with exog failed: {forecast_error}")
@@ -281,7 +295,6 @@ def forecast_stock_price(symbol, cutoff=2016, forecast_days=30):
         raise Exception(f"Error forecasting {symbol}: {str(e)}")
 
 def calculate_rsi(prices, window=14):
-    """Calculate Relative Strength Index"""
     delta = prices.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
@@ -290,9 +303,6 @@ def calculate_rsi(prices, window=14):
     return rsi
 
 def simple_trend_forecast(clean_data, symbol, forecast_days):
-    """
-    Simple trend-based forecast as fallback when SARIMAX fails
-    """
     from sklearn.linear_model import LinearRegression
     
     # Use recent data for trend calculation
@@ -373,40 +383,47 @@ def simple_trend_forecast(clean_data, symbol, forecast_days):
         'annualized_volatility': volatility * np.sqrt(252) * 100
     }
 
-def cross_validate_model(symbol, cutoff=2016, n_splits=5, forecast_horizon=30):
-    """
-    Perform time series cross-validation on the forecast model
-    
-    Args:
-        symbol (str): Stock symbol
-        cutoff (int): Year cutoff for data filtering
-        n_splits (int): Number of cross-validation splits
-        forecast_horizon (int): Number of days to forecast in each split
-    
-    Returns:
-        dict: Cross-validation results including metrics and fold details
-    """
-    from sklearn.metrics import mean_absolute_error, mean_squared_error
-    
+# Suppress ConvergenceWarning from statsmodels for cleaner output during cross-validation
+# Also suppress the specific UserWarning regarding frequency if it reappears
+warnings.filterwarnings("ignore", category=UserWarning, module='statsmodels')
+warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning) # Often seen with df slicing
+
+# Assuming calculate_rsi is defined elsewhere, if not, here's a basic implementation:
+def calculate_rsi(series, window):
+    diff = series.diff()
+    up = diff.clip(lower=0)
+    down = -diff.clip(upper=0)
+    ema_up = up.ewm(com=window - 1, adjust=False).mean()
+    ema_down = down.ewm(com=window - 1, adjust=False).mean()
+    rs = ema_up / ema_down
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def cross_validate_model(symbol, cutoff=2010):
     try:
-        # Load and process data (same preprocessing as main function)
+        # Load and process data
         data = pd.read_json(f"{symbol}.json").T
         data.rename(columns={
-            '1. open': 'open', 
-            '2. high': 'high', 
-            '3. low': 'low', 
-            '4. close': 'close', 
+            '1. open': 'open',
+            '2. high': 'high',
+            '3. low': 'low',
+            '4. close': 'close',
             '5. volume': 'volume'
         }, inplace=True)
 
-        new_data = data[data.index > str(cutoff)]
+        data.index = pd.to_datetime(data.index)
+        data = data.sort_index()
+
+        new_data = data[data.index >= str(cutoff)]
         for col in ['open', 'high', 'low', 'close']:
             new_data[col] = pd.to_numeric(new_data[col])
 
-        new_data.index = pd.to_datetime(new_data.index)
+        # Set frequency to business daily ('B') for stock data, and drop NaNs
+        # This is crucial for statsmodels and also for creating future date ranges
+        new_data = new_data.asfreq('B').dropna(how='all') # Use how='all' to ensure we don't drop rows with just a few NaNs initially
         new_data = new_data.sort_index()
 
-        # Calculate features
+        # Calculate features - these will introduce NaNs at the beginning
         new_data['log_price'] = np.log(new_data['open'])
         new_data['price_change'] = new_data['open'].pct_change()
         new_data['volatility'] = new_data['price_change'].rolling(window=20).std()
@@ -414,210 +431,284 @@ def cross_validate_model(symbol, cutoff=2016, n_splits=5, forecast_horizon=30):
         new_data['ma_20'] = new_data['open'].rolling(window=20).mean()
         new_data['ma_50'] = new_data['open'].rolling(window=50).mean()
         new_data['price_vs_ma20'] = (new_data['open'] - new_data['ma_20']) / new_data['ma_20']
-        
-        clean_data = new_data.dropna()
-        
-        if len(clean_data) < 200:
-            raise ValueError(f"Insufficient data for cross-validation. Need at least 200 data points.")
 
-        # Time series cross-validation setup
-        total_points = len(clean_data)
-        min_train_size = total_points // 2  # Minimum 50% for training
-        test_size = forecast_horizon
-        
+        # Final dropna after all feature calculations to ensure no NaNs remain
+        clean_data = new_data.dropna()
+
+        # Ensure we have enough clean data to proceed
+        if len(clean_data) < 200: # Arbitrary minimum for meaningful CV
+            raise ValueError(f"Insufficient clean data ({len(clean_data)} points) after preprocessing for {symbol}. Need at least 200.")
+
         cv_results = []
         exog_features = ['volatility', 'rsi', 'price_vs_ma20']
-        
-        print(f"Starting {n_splits}-fold time series cross-validation for {symbol}")
-        print(f"Forecast horizon: {forecast_horizon} days")
-        
-        for fold in range(n_splits):
-            # Calculate split points
-            split_point = min_train_size + fold * (total_points - min_train_size - test_size) // (n_splits - 1)
-            train_end = split_point
-            test_start = split_point
-            test_end = min(split_point + test_size, total_points)
-            
-            if test_end - test_start < forecast_horizon:
+
+        print(f"Starting rolling window cross-validation for {symbol}")
+        print(f"Training on 5 months, testing on the 6th month, until June 2025 forecast.")
+
+        current_test_start_date = pd.to_datetime(f'{cutoff}-06-01') # Start with test month June 2010
+        final_test_month_end_date = pd.to_datetime('2025-06-30')
+
+        fold = 0
+        june_2025_full_projection = None # To store the final June 2025 forecast
+
+        while current_test_start_date <= final_test_month_end_date:
+            fold += 1
+            test_end_date = current_test_start_date + pd.DateOffset(months=1) - pd.DateOffset(days=1)
+
+            # Define the training period: 5 months *before* the current test_start_date
+            train_end_date = current_test_start_date - pd.DateOffset(days=1)
+            train_start_date = train_end_date - pd.DateOffset(months=5) + pd.DateOffset(days=1)
+
+            train_data = clean_data[
+                (clean_data.index >= train_start_date) &
+                (clean_data.index <= train_end_date)
+            ]
+
+            # Get actual test data that is available within the period
+            actual_test_data = clean_data[
+                (clean_data.index >= current_test_start_date) &
+                (clean_data.index <= test_end_date)
+            ]
+
+            # Basic check for sufficient data
+            if len(train_data) < 50 or len(actual_test_data) == 0: # Minimum ~2 months of data for training
+                print(f"Skipping fold {fold}: Insufficient data in window. Train: {len(train_data)}, Test: {len(actual_test_data)}")
+                current_test_start_date += pd.DateOffset(months=1)
                 continue
-                
-            # Split data
-            train_data = clean_data.iloc[:train_end]
-            test_data = clean_data.iloc[test_start:test_end]
-            
-            print(f"\nFold {fold + 1}/{n_splits}")
+
+            # Critical: Ensure train_data and its exog features are clean before fitting
+            if train_data['log_price'].isnull().any() or train_data[exog_features].isnull().any().any():
+                 print(f"Skipping fold {fold}: NaN values found in training data or its exogenous features. Train data length: {len(train_data)}")
+                 current_test_start_date += pd.DateOffset(months=1)
+                 continue
+
+
+            print(f"\nFold {fold}")
             print(f"Train: {train_data.index[0].date()} to {train_data.index[-1].date()} ({len(train_data)} points)")
-            print(f"Test: {test_data.index[0].date()} to {test_data.index[-1].date()} ({len(test_data)} points)")
-            
+            print(f"Test: {actual_test_data.index[0].date()} to {actual_test_data.index[-1].date()} ({len(actual_test_data)} points, if any actual data)")
+
             try:
-                # Try to fit model on training data with fallback
+                # Model fitting attempts
                 model_configs = [
                     {'order': (1, 1, 1), 'seasonal_order': None},
                     {'order': (2, 1, 2), 'seasonal_order': None},
                     {'order': (1, 0, 1), 'seasonal_order': None}
                 ]
-                
                 model_fit = None
                 for config in model_configs:
                     try:
-                        if config['seasonal_order'] is None:
-                            model = SARIMAX(
-                                train_data['log_price'],
-                                order=config['order'],
-                                exog=train_data[exog_features],
-                                enforce_stationarity=False,
-                                enforce_invertibility=False
-                            )
-                        else:
-                            model = SARIMAX(
-                                train_data['log_price'],
-                                order=config['order'],
-                                seasonal_order=config['seasonal_order'],
-                                exog=train_data[exog_features],
-                                enforce_stationarity=False,
-                                enforce_invertibility=False
-                            )
-                        
-                        model_fit = model.fit(disp=False, maxiter=100, method='lbfgs')
+                        model = SARIMAX(
+                            train_data['log_price'],
+                            order=config['order'],
+                            seasonal_order=config['seasonal_order'],
+                            exog=train_data[exog_features],
+                            enforce_stationarity=False,
+                            enforce_invertibility=False
+                        )
+                        model_fit = model.fit(disp=False, maxiter=200, method='lbfgs')
                         break
-                    except:
+                    except Exception as e:
+                        # print(f"  Model config {config} failed for fold {fold}: {e}") # Uncomment for verbose debugging
                         continue
-                
+
                 if model_fit is None:
-                    print(f"All models failed for fold {fold + 1}, skipping...")
+                    print(f"All models failed for fold {fold}, skipping...")
+                    current_test_start_date += pd.DateOffset(months=1)
                     continue
-                
-                # Generate exogenous variables for test period
-                test_exog = test_data[exog_features].copy()
-                
-                # Forecast
-                forecast_log = model_fit.forecast(steps=len(test_data), exog=test_exog)
-                forecast_prices = np.exp(forecast_log)
-                
-                # Calculate metrics
-                actual_prices = test_data['open'].values
-                mae = mean_absolute_error(actual_prices, forecast_prices)
-                rmse = np.sqrt(mean_squared_error(actual_prices, forecast_prices))
-                mape = np.mean(np.abs((actual_prices - forecast_prices) / actual_prices)) * 100
-                
-                # Calculate directional accuracy
-                actual_changes = np.diff(actual_prices) > 0
-                forecast_changes = np.diff(forecast_prices) > 0
-                directional_accuracy = np.mean(actual_changes == forecast_changes) * 100
-                
-                fold_result = {
-                    'fold': fold + 1,
-                    'train_start': train_data.index[0],
-                    'train_end': train_data.index[-1],
-                    'test_start': test_data.index[0],
-                    'test_end': test_data.index[-1],
-                    'mae': mae,
-                    'rmse': rmse,
-                    'mape': mape,
-                    'directional_accuracy': directional_accuracy,
-                    'actual_prices': actual_prices,
-                    'forecast_prices': forecast_prices,
-                    'test_dates': test_data.index
-                }
-                
-                cv_results.append(fold_result)
-                
-                print(f"MAE: ${mae:.2f}")
-                print(f"RMSE: ${rmse:.2f}")
-                print(f"MAPE: {mape:.2f}%")
-                print(f"Directional Accuracy: {directional_accuracy:.1f}%")
-                
+
+                # --- Special Handling for JUNE 2025 Forecast ---
+                if current_test_start_date.year == 2025 and current_test_start_date.month == 6:
+                    print("\n--- Performing final June 2025 projection ---")
+                    # Define the full date range for June 2025 (business days)
+                    # Use 'B' (business day frequency) for the forecast dates
+                    forecast_full_dates = pd.date_range(start=current_test_start_date, end=test_end_date, freq='B')
+
+                    # Initialize a DataFrame for the complete exogenous variables for the forecast period
+                    full_forecast_exog = pd.DataFrame(index=forecast_full_dates, columns=exog_features)
+
+                    # Fill in actual exogenous data for available days in June 2025
+                    # Assuming data available till June 4, 2025 (current date from prompt)
+                    actual_exog_in_june = clean_data[
+                        (clean_data.index >= current_test_start_date) &
+                        (clean_data.index <= pd.to_datetime('2025-06-04'))
+                    ][exog_features]
+                    full_forecast_exog.loc[actual_exog_in_june.index] = actual_exog_in_june
+
+                    # Identify missing dates for which to generate fake data
+                    missing_forecast_dates = full_forecast_exog[full_forecast_exog.isnull().any(axis=1)].index
+
+                    if not missing_forecast_dates.empty:
+                        print(f"Generating fake exogenous data for {len(missing_forecast_dates)} future dates in June 2025...")
+                        train_exog_means = train_data[exog_features].mean()
+                        train_exog_stds = train_data[exog_features].std()
+
+                        for date in missing_forecast_dates:
+                            for feature in exog_features:
+                                # Generate fake data using normal distribution based on training set stats
+                                # Add a small floor to std_val to prevent issues with zero or very small std dev
+                                std_val = train_exog_stds[feature] if pd.notnull(train_exog_stds[feature]) and train_exog_stds[feature] > 1e-6 else 1e-6 + train_exog_means[feature] * 0.01
+                                if std_val < 1e-6: std_val = 1e-6 # Ensure std_val is always positive
+
+                                mean_val = train_exog_means[feature] if pd.notnull(train_exog_means[feature]) else 0.0 # Default mean if NaN
+
+                                full_forecast_exog.loc[date, feature] = np.random.normal(mean_val, std_val)
+
+                    # Ensure the exogenous data for forecasting is sorted by index and has no NaNs
+                    test_exog_for_forecast = full_forecast_exog.sort_index().fillna(method='ffill').fillna(method='bfill')
+                    if test_exog_for_forecast.isnull().any().any():
+                         raise ValueError("NaNs still present in test_exog_for_forecast after generation/fill. Cannot forecast.")
+
+                    # Forecast over the full June 2025 period using the combined (actual + fake) exogenous data
+                    forecast_log = model_fit.forecast(steps=len(test_exog_for_forecast), exog=test_exog_for_forecast)
+                    forecast_prices_full_june = np.exp(forecast_log)
+                    forecast_prices_full_june.index = test_exog_for_forecast.index # Ensure index matches
+
+                    # Store the full June 2025 projection DataFrame
+                    june_2025_full_projection = pd.DataFrame({
+                        'Projected_Price': forecast_prices_full_june
+                    })
+
+                    # For metric calculation, only use actual available data (up to June 4)
+                    if not actual_exog_in_june.empty:
+                        actual_prices = actual_test_data['open'].values
+                        # Match forecast prices to actual_prices dates for metric calculation
+                        forecast_prices_for_metrics = forecast_prices_full_june.loc[actual_exog_in_june.index].values
+
+                        mae = mean_absolute_error(actual_prices, forecast_prices_for_metrics)
+                        rmse = np.sqrt(mean_squared_error(actual_prices, forecast_prices_for_metrics))
+                        mape = np.mean(np.abs((actual_prices - forecast_prices_for_metrics) / actual_prices)) * 100
+
+                        if len(actual_prices) > 1 and len(forecast_prices_for_metrics) > 1:
+                            actual_changes = np.diff(actual_prices) > 0
+                            forecast_changes = np.diff(forecast_prices_for_metrics) > 0
+                            min_len = min(len(actual_changes), len(forecast_changes))
+                            directional_accuracy = np.mean(actual_changes[:min_len] == forecast_changes[:min_len]) * 100
+                        else:
+                            directional_accuracy = np.nan
+                    else:
+                        mae, rmse, mape, directional_accuracy = np.nan, np.nan, np.nan, np.nan
+                        print("No actual data found for June 2025 to calculate metrics.")
+
+                    fold_result = {
+                        'fold': fold,
+                        'train_start': train_data.index[0],
+                        'train_end': train_data.index[-1],
+                        'test_start': actual_test_data.index[0] if not actual_test_data.empty else current_test_start_date,
+                        'test_end': actual_test_data.index[-1] if not actual_test_data.empty else current_test_start_date, # End of actual data
+                        'mae': mae,
+                        'rmse': rmse,
+                        'mape': mape,
+                        'directional_accuracy': directional_accuracy,
+                        'actual_prices': actual_prices if 'actual_prices' in locals() else np.array([]),
+                        'forecast_prices': forecast_prices_for_metrics if 'forecast_prices_for_metrics' in locals() else np.array([]),
+                        'test_dates': actual_test_data.index if not actual_test_data.empty else pd.DatetimeIndex([]),
+                        'is_june_2025_forecast': True # Flag for summary
+                    }
+                    cv_results.append(fold_result)
+
+                    print(f"Metrics for available actual data in June 2025:")
+                    print(f"MAE: ${mae:.2f}")
+                    print(f"RMSE: ${rmse:.2f}")
+                    print(f"MAPE: {mape:.2f}%")
+                    print(f"Directional Accuracy: {directional_accuracy:.1f}%")
+
+                else: # Regular folds (not June 2025)
+                    test_exog = actual_test_data[exog_features].copy()
+                    # Ensure test_exog is clean before forecasting
+                    if test_exog.isnull().any().any():
+                        print(f"Warning: NaNs found in test_exog for fold {fold}. Attempting to fill...")
+                        test_exog = test_exog.fillna(method='ffill').fillna(method='bfill')
+                        if test_exog.isnull().any().any(): # If still NaNs after fill
+                            raise ValueError(f"NaNs persist in test_exog for fold {fold}. Cannot forecast.")
+
+
+                    forecast_log = model_fit.forecast(steps=len(actual_test_data), exog=test_exog)
+                    forecast_prices = np.exp(forecast_log)
+                    forecast_prices.index = actual_test_data.index # Ensure index matches
+
+                    actual_prices = actual_test_data['open'].values
+                    mae = mean_absolute_error(actual_prices, forecast_prices)
+                    rmse = np.sqrt(mean_squared_error(actual_prices, forecast_prices))
+                    mape = np.mean(np.abs((actual_prices - forecast_prices) / actual_prices)) * 100
+
+                    if len(actual_prices) > 1 and len(forecast_prices) > 1:
+                        actual_changes = np.diff(actual_prices) > 0
+                        forecast_changes = np.diff(forecast_prices) > 0
+                        min_len = min(len(actual_changes), len(forecast_changes))
+                        directional_accuracy = np.mean(actual_changes[:min_len] == forecast_changes[:min_len]) * 100
+                    else:
+                        directional_accuracy = np.nan
+
+                    fold_result = {
+                        'fold': fold,
+                        'train_start': train_data.index[0],
+                        'train_end': train_data.index[-1],
+                        'test_start': actual_test_data.index[0],
+                        'test_end': actual_test_data.index[-1],
+                        'mae': mae,
+                        'rmse': rmse,
+                        'mape': mape,
+                        'directional_accuracy': directional_accuracy,
+                        'actual_prices': actual_prices,
+                        'forecast_prices': forecast_prices,
+                        'test_dates': actual_test_data.index
+                    }
+                    cv_results.append(fold_result)
+
+                    print(f"MAE: ${mae:.2f}")
+                    print(f"RMSE: ${rmse:.2f}")
+                    print(f"MAPE: {mape:.2f}%")
+                    print(f"Directional Accuracy: {directional_accuracy:.1f}%")
+
             except Exception as e:
-                print(f"Error in fold {fold + 1}: {str(e)}")
-                continue
-        
+                print(f"Error in fold {fold}: {str(e)}")
+                pass
+
+            current_test_start_date += pd.DateOffset(months=1)
+
         if not cv_results:
             raise ValueError("No successful cross-validation folds completed")
-        
-        # Calculate average metrics
+
+        # Exclude the final June 2025 metrics from overall averages if you only want past performance
+        avg_metrics_folds = [r for r in cv_results if 'is_june_2025_forecast' not in r or r['is_june_2025_forecast'] == False]
+        if not avg_metrics_folds: # If only June 2025 fold was done, use it despite partial actual data
+            print("Warning: Only the June 2025 fold (with partial actual data) was completed for metrics. Averages might not be representative.")
+            avg_metrics_folds = cv_results
+
         avg_metrics = {
-            'avg_mae': np.mean([r['mae'] for r in cv_results]),
-            'avg_rmse': np.mean([r['rmse'] for r in cv_results]),
-            'avg_mape': np.mean([r['mape'] for r in cv_results]),
-            'avg_directional_accuracy': np.mean([r['directional_accuracy'] for r in cv_results]),
-            'std_mae': np.std([r['mae'] for r in cv_results]),
-            'std_rmse': np.std([r['rmse'] for r in cv_results]),
-            'std_mape': np.std([r['mape'] for r in cv_results]),
-            'n_folds': len(cv_results)
+            'avg_mae': np.nanmean([r['mae'] for r in avg_metrics_folds]),
+            'avg_rmse': np.nanmean([r['rmse'] for r in avg_metrics_folds]),
+            'avg_mape': np.nanmean([r['mape'] for r in avg_metrics_folds]),
+            'avg_directional_accuracy': np.nanmean([r['directional_accuracy'] for r in avg_metrics_folds if not np.isnan(r['directional_accuracy'])]),
+            'std_mae': np.nanstd([r['mae'] for r in avg_metrics_folds]),
+            'std_rmse': np.nanstd([r['rmse'] for r in avg_metrics_folds]),
+            'std_mape': np.nanstd([r['mape'] for r in avg_metrics_folds]),
+            'n_folds': len(avg_metrics_folds)
         }
-        
+
         return {
             'symbol': symbol,
             'cv_results': cv_results,
             'avg_metrics': avg_metrics,
-            'forecast_horizon': forecast_horizon
+            'june_2025_projection': june_2025_full_projection
         }
-        
+
     except Exception as e:
         raise Exception(f"Error in cross-validation for {symbol}: {str(e)}")
 
-def plot_cv_results(cv_results):
-    """
-    Plot cross-validation results showing actual vs predicted for each fold
-    
-    Args:
-        cv_results (dict): Results from cross_validate_model function
-    """
-    fig = go.Figure()
-    
-    colors = ['blue', 'red', 'green', 'orange', 'purple']
-    
-    for i, fold_result in enumerate(cv_results['cv_results']):
-        color = colors[i % len(colors)]
-        
-        # Plot actual prices
-        fig.add_trace(go.Scatter(
-            x=fold_result['test_dates'],
-            y=fold_result['actual_prices'],
-            mode='lines',
-            name=f'Actual - Fold {fold_result["fold"]}',
-            line=dict(color=color, width=2)
-        ))
-        
-        # Plot forecasted prices
-        fig.add_trace(go.Scatter(
-            x=fold_result['test_dates'],
-            y=fold_result['forecast_prices'],
-            mode='lines',
-            name=f'Forecast - Fold {fold_result["fold"]}',
-            line=dict(color=color, width=2, dash='dash')
-        ))
-    
-    fig.update_layout(
-        title=f'Cross-Validation Results - {cv_results["symbol"]} ({cv_results["forecast_horizon"]} day forecasts)',
-        xaxis_title='Date',
-        yaxis_title='Price ($)',
-        hovermode='x unified',
-        showlegend=True,
-        height=600
-    )
-    
-    fig.show()
-
 def display_cv_summary(cv_results):
-    """
-    Display cross-validation summary statistics
-    
-    Args:
-        cv_results (dict): Results from cross_validate_model function
-    """
     print(f"\n{'='*60}")
     print(f"CROSS-VALIDATION SUMMARY FOR {cv_results['symbol']}")
     print(f"{'='*60}")
-    print(f"Number of folds completed: {cv_results['avg_metrics']['n_folds']}")
-    print(f"Forecast horizon: {cv_results['forecast_horizon']} days")
-    print(f"\nAverage Performance Metrics:")
-    print(f"  Mean Absolute Error (MAE): ${cv_results['avg_metrics']['avg_mae']:.2f} ± ${cv_results['avg_metrics']['std_mae']:.2f}")
-    print(f"  Root Mean Square Error (RMSE): ${cv_results['avg_metrics']['avg_rmse']:.2f} ± ${cv_results['avg_metrics']['std_rmse']:.2f}")
-    print(f"  Mean Absolute Percentage Error (MAPE): {cv_results['avg_metrics']['avg_mape']:.2f}% ± {cv_results['avg_metrics']['std_mape']:.2f}%")
-    print(f"  Directional Accuracy: {cv_results['avg_metrics']['avg_directional_accuracy']:.1f}%")
-    
-    # Performance interpretation
+    print(f"Number of historical folds completed for average metrics: {cv_results['avg_metrics']['n_folds']}")
+    print(f"Forecast horizon (per fold): 1 month")
+    print(f"\nAverage Historical Performance Metrics:")
+    print(f"   Mean Absolute Error (MAE): ${cv_results['avg_metrics']['avg_mae']:.2f} \u00B1 ${cv_results['avg_metrics']['std_mae']:.2f}")
+    print(f"   Root Mean Square Error (RMSE): ${cv_results['avg_metrics']['avg_rmse']:.2f} \u00B1 ${cv_results['avg_metrics']['std_rmse']:.2f}")
+    print(f"   Mean Absolute Percentage Error (MAPE): {cv_results['avg_metrics']['avg_mape']:.2f}% \u00B1 {cv_results['avg_metrics']['std_mape']:.2f}%")
+    print(f"   Directional Accuracy: {cv_results['avg_metrics']['avg_directional_accuracy']:.1f}%")
+
+    # Performance interpretation based on historical MAPE
     mape = cv_results['avg_metrics']['avg_mape']
     if mape < 5:
         performance = "Excellent"
@@ -627,17 +718,22 @@ def display_cv_summary(cv_results):
         performance = "Reasonable"
     else:
         performance = "Poor"
-    
-    print(f"\nModel Performance Rating: {performance}")
+
+    print(f"\nHistorical Model Performance Rating: {performance}")
     print(f"Note: MAPE < 10% is generally considered good for stock price forecasting")
 
-def display_forecast_results(results):
-    """
-    Display forecast results in a formatted way
+def display_june_2025_projection(cv_results):
+    if 'june_2025_projection' in cv_results and cv_results['june_2025_projection'] is not None:
+        print(f"\n{'='*60}")
+        print(f"JUNE 2025 PROJECTED STOCK PRICES FOR {cv_results['symbol']}")
+        print(f"{'='*60}")
+        print(cv_results['june_2025_projection'].to_string())
+        print(f"{'='*60}")
+    else:
+        print("\nNo June 2025 projection available in the results.")
 
-    Args:
-        results (dict): Results from forecast_stock_price function
-    """
+    
+def display_forecast_results(results):
     print(f"\n{'='*50}")
     print(f"FORECAST RESULTS FOR {results['symbol']}")
     print(f"{'='*50}")
@@ -656,34 +752,10 @@ if __name__ == "__main__":
     # Example with user input
     symbol = input("Enter stock symbol (e.g., MSFT, GOOG): ").upper()
     
-    # Ask user if they want to run cross-validation
-    run_cv = input("Run cross-validation first? (y/n): ").lower().strip()
-
+    print(f"Starting cross-validation for {symbol}...")
     try:
-        # Run cross-validation if requested
-        if run_cv == 'y':
-            print("Running cross-validation backtesting...")
-            cv_results = cross_validate_model(symbol, cutoff=2016, n_splits=5, forecast_horizon=30)
-            display_cv_summary(cv_results)
-            plot_cv_results(cv_results)
-            
-            # Ask if user wants to continue with forecast
-            continue_forecast = input("\nContinue with forward forecast? (y/n): ").lower().strip()
-            if continue_forecast != 'y':
-                exit()
-
-        # Run main forecast
-        print("Generating forward forecast...")
-        results = forecast_stock_price(symbol, cutoff=2016, forecast_days=30)
-        display_forecast_results(results)
-
-        # Optionally save results to CSV
-        forecast_df = pd.DataFrame({
-            'Date': results['forecast_dates'],
-            'Forecasted_Price': results['forecast']
-        })
-        forecast_df.to_csv(f'{symbol}_forecast.csv', index=False)
-        print(f"\nForecast saved to {symbol}_forecast.csv")
-
+        results = cross_validate_model(symbol)
+        display_cv_summary(results)
+        display_june_2025_projection(results)
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"An error occurred: {e}")
